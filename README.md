@@ -39,7 +39,7 @@ the instant it goes true -- faster than a human could reach for a remote.
    becoming available.
 
 Keep the script running in the background (it loops forever, reconnecting if
-the TV's session ever drops). Two common ways to keep it running 24/7:
+the TV's session ever drops). Three common ways to keep it running 24/7:
 
 ### Option A: systemd (Linux machine / Raspberry Pi)
 
@@ -81,6 +81,78 @@ the container reuses it instead of needing an interactive prompt:
 ```
 docker run -d --restart unless-stopped -v $(pwd)/auth.json:/app/auth.json ad-skipper
 ```
+
+### Option C: AWS EC2
+
+Running it on a small cloud VM means nothing at home has to stay on. And
+because the "Link with TV code" pairing is cloud-mediated -- it registers
+your client through YouTube's servers, not via local-network discovery -- the
+instance does **not** need to be on the same network as the TV. It can live
+in any region.
+
+1. **Launch an instance.** A `t3.micro` (or `t2.micro`) on the free tier is
+   plenty: the script just holds a connection and waits, so CPU/RAM usage is
+   negligible. Amazon Linux 2023 or Ubuntu both work fine.
+
+2. **Security group.** The script only makes *outbound* connections to
+   YouTube, so you don't need to open any inbound app ports. Allow inbound
+   SSH (port 22) from your IP only, and keep the default "allow all
+   outbound". (If you later add the optional FastAPI `/status` endpoint,
+   open that port too -- ideally restricted to your own IP.)
+
+3. **SSH in and set up.** Using a virtualenv keeps things clean and avoids
+   the "externally-managed-environment" pip error on newer Ubuntu/Debian:
+   ```bash
+   # Amazon Linux 2023
+   sudo dnf install -y python3 python3-pip git
+   # Ubuntu: sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
+
+   git clone <your-repo-url> youtube-ad-skipper
+   cd youtube-ad-skipper
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+   ```
+
+4. **Pair once (interactively).** Pairing needs the TV code typed in once, so
+   run it by hand the first time to generate `auth.json`:
+   ```bash
+   .venv/bin/python skipper.py
+   ```
+   Open YouTube on the TV > Settings > "Link with TV code", paste the code,
+   confirm it skips an ad, then Ctrl-C. (Alternatively, pair on your laptop
+   and `scp auth.json` up to the instance.)
+
+5. **Run it 24/7 with systemd.** Reuse the Option A unit file, adjusting
+   `User`, `WorkingDirectory`, and the python path. On Amazon Linux the
+   default user is `ec2-user`; point `ExecStart` at the venv's python:
+   ```ini
+   [Unit]
+   Description=YouTube Ad Skipper
+   After=network-online.target
+
+   [Service]
+   User=ec2-user
+   WorkingDirectory=/home/ec2-user/youtube-ad-skipper
+   ExecStart=/home/ec2-user/youtube-ad-skipper/.venv/bin/python skipper.py
+   Restart=always
+   RestartSec=5
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+   ```bash
+   sudo cp ad-skipper.service /etc/systemd/system/
+   sudo systemctl enable --now ad-skipper
+   journalctl -u ad-skipper -f
+   ```
+   `enable` makes it survive instance reboots; `Restart=always` covers the
+   script reconnecting if the TV session drops.
+
+**Cost note:** outside the 12-month free tier a `t3.micro` runs a few dollars
+a month, and since the instance only talks outbound you don't need an Elastic
+IP or any inbound traffic. To go cheaper, the same steps work on a `t4g.nano`
+(ARM/Graviton) -- the dependencies are pure Python, so the architecture
+doesn't matter.
 
 ## Notes & gotchas
 
